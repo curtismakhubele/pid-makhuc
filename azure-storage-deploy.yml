@@ -1,0 +1,22 @@
+name: Deploy PID Facilities Management System to Azure Storage Static Website
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Upload index.html to $web container
+        uses: azure/CLI@v2
+        with:
+          inlineScript: |
+            az storage blob upload \
+              --connection-string "${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" \
+              --container-name '$web' \
+              --name index.html \
+              --file index.html \
+              --overwrite
