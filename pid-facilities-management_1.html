@@ -31,6 +31,12 @@
   .role-switch select{width:100%;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);color:#fff;padding:8px 9px;border-radius:7px;font-family:var(--font-body);font-size:12.5px;font-weight:500;}
   .role-switch select option{background:#1B2330;color:#fff;}
 
+  .ms-auth-box{background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:10px 11px;margin-bottom:16px;}
+  .ms-auth-box .signed-in{display:flex;align-items:center;gap:8px;}
+  .ms-auth-box .signed-in .avatar-sm{width:22px;height:22px;border-radius:50%;background:var(--accent);color:#2A1A02;font-family:var(--font-mono);font-size:10px;font-weight:600;display:flex;align-items:center;justify-content:center;flex:none;}
+  .ms-auth-box a.auth-link{color:var(--accent);font-size:11.5px;font-weight:600;text-decoration:none;cursor:pointer;}
+  .ms-auth-box a.auth-link:hover{text-decoration:underline;}
+
   nav.groups{display:flex;flex-direction:column;gap:16px;}
   .navgroup .label{font-size:10.5px;text-transform:uppercase;letter-spacing:0.8px;color:#5A6472;padding:0 10px 6px;}
   .navitem{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:8px;cursor:pointer;font-size:13.5px;color:var(--sidebar-soft);transition:background 0.15s,color 0.15s;}
@@ -191,6 +197,11 @@
         <option value="technician">Technician</option>
         <option value="intern">Intern</option>
       </select>
+    </div>
+
+    <div class="ms-auth-box" id="ms-auth-box">
+      <div style="font-size:9.5px;text-transform:uppercase;letter-spacing:0.6px;color:#5A6472;margin-bottom:6px;">Admin sign-in</div>
+      <div id="ms-auth-status" style="font-size:12px;color:#B9C4D0;">Checking…</div>
     </div>
 
     <nav class="groups" id="nav-groups">
@@ -455,6 +466,21 @@
     <section class="view" id="view-settings">
       <div class="topbar"><div><h1>Settings</h1><div class="meta">Data and system preferences</div></div></div>
       <div class="panel">
+        <div class="panel-head"><div><h2>Microsoft sign-in for Admin</h2><div class="sub" id="settings-ms-status">Checking connection…</div></div></div>
+        <p style="color:var(--ink-soft);margin-top:0;">This uses Azure's own built-in authentication (App Service "Authentication" / Easy Auth) —
+        real Microsoft/Entra sign-in, handled entirely by Azure's servers. No OAuth code or secrets live in this app.</p>
+        <div class="list-simple" style="margin-bottom:14px;">
+          <div class="row"><div><div class="t">1. In the Azure Portal</div><div class="s">Open your Web App → left menu → <strong>Authentication</strong></div></div></div>
+          <div class="row"><div><div class="t">2. Add identity provider</div><div class="s">Choose <strong>Microsoft</strong> → Create new app registration (Quick) → keep defaults</div></div></div>
+          <div class="row"><div><div class="t">3. Restrict access</div><div class="s">Choose <strong>"Allow unauthenticated access"</strong> — this lets the app load for everyone; the Admin gate below is enforced inside the app itself</div></div></div>
+          <div class="row"><div><div class="t">4. Save, then reload this app</div><div class="s">The sign-in box in the sidebar will switch from "Not connected" to a real "Sign in with Microsoft" link</div></div></div>
+        </div>
+        <div class="field" style="max-width:360px;">
+          <label><input type="checkbox" id="require-ms-auth-toggle" style="width:auto;margin-right:6px;" onchange="toggleRequireMsAuth(this.checked)"> Require Microsoft sign-in to switch into Admin view</label>
+        </div>
+        <p style="color:var(--ink-soft);font-size:12px;margin-bottom:0;">Note: this checkbox controls the in-app view switch only. Since this app has no backend, it doesn't restrict the underlying data — real per-role data security needs a backend, same as the credentials feature.</p>
+      </div>
+      <div class="panel">
         <div class="panel-head"><div><h2>Data storage</h2></div></div>
         <p style="color:var(--ink-soft);margin-top:0;">All records are saved to your Claude account's private artifact storage and are <strong>only visible to you</strong>.</p>
         <button class="btn btn-danger btn-sm" onclick="resetData()">Clear all data</button>
@@ -514,6 +540,7 @@ let DATA = null;
 let state = { role:'admin', filterCentre:'all', currentInternId:null };
 
 async function loadData(){
+  checkMsAuth();
   try{
     const res = await window.storage.get(STORE_KEY, false);
     if(res && res.value){ DATA = JSON.parse(res.value); }
@@ -521,6 +548,7 @@ async function loadData(){
   }catch(e){ DATA = blankData(); seedDemoData(); }
   if(!DATA.centres) DATA.centres = [];
   if(!DATA.users) DATA.users = [];
+  if(typeof DATA.requireMsAuthForAdmin === 'undefined') DATA.requireMsAuthForAdmin = false;
   applyRole('admin');
   renderAll();
 }
@@ -529,7 +557,7 @@ async function persist(){
   catch(e){ showToast('Could not save — data will not persist'); }
 }
 function blankData(){
-  return { orgName:'', msEmail:'', waNumber:'',
+  return { orgName:'', msEmail:'', waNumber:'', requireMsAuthForAdmin:false,
     centres:[], users:[], assets:[], workOrders:[], pmTasks:[], projects:[], incidents:[], inspections:[],
     internChecklists:{}, seq:{asset:0,wo:0,pm:0,proj:0,inc:0,insp:0,centre:0,user:0} };
 }
@@ -613,7 +641,62 @@ function osmEmbed(lat,lng,zoomBox){
 
 /* ---------- role & nav ---------- */
 const ROLE_DEFAULT_VIEW = { admin:'overview', hq:'hq', centre:'overview', technician:'workorders', intern:'intern' };
+
+/* ---------- Microsoft sign-in (Azure App Service "Easy Auth") ----------
+   This uses Azure's built-in authentication, not a custom OAuth implementation.
+   It only works once this app is deployed to an Azure Web App with an Identity
+   Provider (Microsoft) configured under Authentication in the Azure Portal.
+   In any other environment (local file, Claude artifact preview, GitHub Pages,
+   Netlify, plain Storage static website) the /.auth/ endpoints don't exist,
+   so this gracefully falls back to "not available here" rather than blocking anyone. */
+let msAuth = { available:null, user:null };
+
+async function checkMsAuth(){
+  try{
+    const res = await fetch('/.auth/me', { headers:{ 'Accept':'application/json' } });
+    if(!res.ok){ msAuth.available = false; renderAuthBox(); return; }
+    const data = await res.json();
+    msAuth.available = true;
+    if(Array.isArray(data) && data.length && data[0].user_claims){
+      const claims = data[0].user_claims;
+      const nameClaim = claims.find(c=>c.typ && c.typ.includes('name')) || {};
+      const emailClaim = claims.find(c=>c.typ && (c.typ.includes('emailaddress') || c.typ === 'preferred_username')) || {};
+      msAuth.user = { name: nameClaim.val || data[0].user_id || 'Signed in', email: emailClaim.val || data[0].user_id || '' };
+    } else {
+      msAuth.user = null;
+    }
+  }catch(e){
+    msAuth.available = false;
+  }
+  renderAuthBox();
+}
+function msSignIn(){
+  window.location.href = '/.auth/login/aad?post_login_redirect_uri=' + encodeURIComponent(window.location.pathname + window.location.search);
+}
+function msSignOut(){
+  window.location.href = '/.auth/logout?post_logout_redirect_uri=' + encodeURIComponent(window.location.pathname);
+}
+function renderAuthBox(){
+  const box = document.getElementById('ms-auth-status');
+  if(msAuth.available === null){ box.textContent = 'Checking…'; return; }
+  if(msAuth.available === false){
+    box.innerHTML = `Not connected — deploy to Azure App Service and enable Authentication (Microsoft) to activate this. <a class="auth-link" onclick="goToView('settings');document.querySelector('.navitem[data-view=settings]').click();">See Settings</a>`;
+    return;
+  }
+  if(msAuth.user){
+    box.innerHTML = `<div class="signed-in"><div class="avatar-sm">${initialsSafe(msAuth.user.name)}</div><div style="min-width:0;"><div style="color:#fff;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${msAuth.user.name}</div><a class="auth-link" onclick="msSignOut()">Sign out</a></div></div>`;
+  } else {
+    box.innerHTML = `<a class="auth-link" onclick="msSignIn()">🔑 Sign in with Microsoft</a>`;
+  }
+}
+function initialsSafe(name){ return (name||'?').split(' ').map(p=>p[0]).join('').slice(0,2).toUpperCase(); }
+
 function applyRole(role){
+  if(role === 'admin' && DATA && DATA.requireMsAuthForAdmin && msAuth.available && !msAuth.user){
+    showToast('Sign in with Microsoft required for Admin access');
+    msSignIn();
+    return;
+  }
   state.role = role;
   document.getElementById('role-select').value = role;
   document.querySelectorAll('[data-roles]').forEach(el=>{
@@ -1223,6 +1306,7 @@ function renderReports(){
 function saveEmail(){ DATA.msEmail = document.getElementById('ms-email-input').value.trim(); persist(); showToast('Saved'); }
 function saveWaNumber(){ DATA.waNumber = document.getElementById('wa-number-input').value.trim(); persist(); showToast('Saved'); }
 function saveOrgName(){ DATA.orgName = document.getElementById('org-name-input').value.trim(); persist(); showToast('Saved'); renderTopbar(); }
+function toggleRequireMsAuth(checked){ DATA.requireMsAuthForAdmin = checked; persist(); showToast(checked ? 'Admin now requires Microsoft sign-in' : 'Admin sign-in requirement removed'); }
 async function resetData(){
   if(!confirm('This will permanently delete all centres, assets, work orders, maintenance, projects, users and safety records. Continue?')) return;
   DATA = blankData(); DATA.orgName = ''; await persist(); renderAll(); showToast('All data cleared');
@@ -1231,6 +1315,14 @@ function renderTopbar(){
   const ms = document.getElementById('ms-email-input'); if(ms) ms.value = DATA.msEmail || '';
   const wa = document.getElementById('wa-number-input'); if(wa) wa.value = DATA.waNumber || '';
   const org = document.getElementById('org-name-input'); if(org) org.value = DATA.orgName || '';
+  const toggle = document.getElementById('require-ms-auth-toggle'); if(toggle && DATA) toggle.checked = !!DATA.requireMsAuthForAdmin;
+  const status = document.getElementById('settings-ms-status');
+  if(status){
+    if(msAuth.available === null) status.textContent = 'Checking connection…';
+    else if(msAuth.available === false) status.textContent = 'Not connected in this environment yet — follow the steps below once deployed to Azure.';
+    else if(msAuth.user) status.textContent = 'Connected — signed in as ' + msAuth.user.email;
+    else status.textContent = 'Connected — Azure Authentication is active, no one signed in yet.';
+  }
 }
 
 /* ---------- global search ---------- */
